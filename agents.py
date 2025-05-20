@@ -4,9 +4,9 @@
 
 from  __future__ import annotations
 
-from dotenv import load_dotenv
 import json, os
 from typing import List, Dict, Any
+from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI                                     # GPT-4 wrapper
 from langchain_core.prompts import PromptTemplate                           # Prompt building
@@ -15,14 +15,6 @@ from langchain.output_parsers import StructuredOutputParser, ResponseSchema # JS
 from arxiv_search import hybrid_search
 
 load_dotenv()
-print("API KEY LOADED:", os.getenv("OPENAI_API_KEY"))
-
-# Helper LLM
-# LLM = ChatOpenAI(
-#     model="gpt-4o",
-#     temperature=0.3,
-#     model_kwargs={"response_format": {"type": "json_object"}}
-# )
 
 # Ontologist
 class OntologistAgent:
@@ -110,36 +102,79 @@ class DomainExpertAgent:
             print("LLM Output:\n", llm_out)
             return {"domain": self.domain, "elaboration": llm_out, "references": []}
 
-class CriticAgent:
-    """ novelty: float, feasbility: float, comments: str """
+class BridgeAgent:
+    """ bridge_idea: str, synergies: str, challenges: str, fused_references: [str] """
     def __init__(self):
         self.llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
             model_kwargs={"response_format": {"type":"json_object"}})
         self.schemas = [
-            ResponseSchema(name="novelty",     description="Novelty score 0-1"),
-            ResponseSchema(name="feasibility", description="Feasibility score 0-1"),
-            ResponseSchema(name="comments",    description="Critical review paragraph")
+            ResponseSchema(name="bridge_idea",      description="Detailed fused proposal"),
+            ResponseSchema(name="synergies",        description="How domain A reinforces B (<120 words)"),
+            ResponseSchema(name="challenges",       description="Integration difficulties (<120 words)"),
+            ResponseSchema(name="fused_references", description="List of 3-5 paper references")
         ]
         self.parser = StructuredOutputParser.from_response_schemas(self.schemas)
         self.prompt = PromptTemplate(
             template=(
-                "You are a meticulous scientific reviewer.\n"
+                "You are an interdisciplinary scientist tasked with integrating two domain "
+                "elaborations into a single innovative idea.\n"
+                "***Elaboration A (JSON)***\n{a_json}\n\n"
+                "***Elaboration B (JSON)***\n{b_json}\n\n"
+                "Use both perspectives, identify synergy & challenges, cite fused references.\n"
+              "{format_instructions}"
+            ),
+            input_variables=["a_json", "b_json"],
+            partial_variables={ "format_instructions": self.parser.get_format_instructions() }
+        )
+
+    def run(self, a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+        llm_out = self.llm.invoke(self.prompt.format(a_json=json.dumps(a, indent=2),
+                                                 b_json=json.dumps(b, indent=2))).content
+        try:
+            return self.parser.parse(llm_out)
+        except Exception:
+            print(" !! Parsing Failed !!")
+            print("LLM Output:\n", llm_out)
+            return {"bridge_idea": a, "synergies": "", "challenges": "", "fused_references": []}
+
+
+# Update: Critic can trigger revision loops
+class CriticAgent:
+    """ novelty: float, feasbility: float, comments: str, recommendation: str """
+    def __init__(self):
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
+            model_kwargs={"response_format": {"type":"json_object"}})
+        self.schemas = [
+            ResponseSchema(name="novelty",        description="Novelty score 0-1"),
+            ResponseSchema(name="feasibility",    description="Feasibility score 0-1"),
+            ResponseSchema(name="comments",       description="Critical review paragraph"),
+            ResponseSchema(name="recommendation", description="REVISE_DOMAIN | REVISE_BRIDGE | ACCEPT")
+        ]
+        self.parser = StructuredOutputParser.from_response_schemas(self.schemas)
+        self.prompt = PromptTemplate(
+            template=(
+                "You are a critical interdisciplinary reviewer.\n"
                 "Evaluate the following cross-domain elaborations.\n\n"
-                "ELABORATIONS:\n{domain_json}\n\n"
+                "ELABORATIONS:\n{bridge_json}\n\n"
                 "Rate novelty (0-1) and feasibility (0-1). Explain in comments.\n"
+                "If novelty < 0.6 output 'REVISE_DOMAIN'. Else if references look weak output 'REVISE_BRIDGE'."
+                "Else 'ACCEPT'.\n"
                 "{format_instructions}"
             ),
-            input_variables=["domain_json"],
+            input_variables=["bridge_json"],
             partial_variables={
                 "format_instructions": self.parser.get_format_instructions()
             }
         )
 
-    def run(self, domain_json_list: List[Dict[str, Any]]) -> Dict[str, Any]:
-        prompt_msg = self.prompt.format(domain_json=json.dumps(domain_json_list, indent=2))
+    def run(self, bridge_json: Dict[str, Any]) -> Dict[str, Any]:
+        prompt_msg = self.prompt.format(bridge_json=json.dumps(bridge_json, indent=2))
         llm_out = self.llm.invoke(prompt_msg).content
         try:
-            return self.parser.parse(llm_out)
+            result = self.parser.parse(llm_out)
+            if result["recommendation"] not in {"REVISE_DOMAIN", "REVISE_BRIDGE", "ACCEPT"}:
+                result["recommendation"] = "ACCEPT"
+            return result
         except Exception:
             print(" !! Parsing Failed !!")
             print("LLM Output:\n", llm_out)
@@ -149,10 +184,11 @@ class CriticAgent:
 
 def run_pipeline(path: List[Dict[str, str]]) -> Dict[str, Any]:
     onto = OntologistAgent().run(path)
-    bio = DomainExpertAgent("Hydrogels & Soft Biomaterials").run(onto)
-    # robo = DomainExpertAgent("Robotics").run(onto)
-    critic = CriticAgent().run([bio])
-    return {"ontologist": onto, "domains": [bio], "critic": critic}
+    bio = DomainExpertAgent("Functional Biochemistry").run(onto)
+    mech = DomainExpertAgent("Bioinspired Mechanics").run(onto)
+    bridge = BridgeAgent().run(bio, mech)
+    critic = CriticAgent().run(bridge)
+    return {"ontologist": onto, "domains": [bio, mech], "bridge": bridge, "critic": critic}
 
 
 if __name__ == "__main__":
