@@ -69,7 +69,7 @@ def select_anchors(domain1: str, domain2: str) -> Tuple[str, str]:
     for n, cid in mapping.items():
         nodes_by_cluster.setdefault(cid, []).append(n)
     
-    print(len(nodes_by_cluster.get(clust1, list(mapping.keys()))), len(nodes_by_cluster.get(clust2, list(mapping.keys()))))
+    # print(f"{domain1} nodes: {len(nodes_by_cluster.get(clust1, list(mapping.keys())))}, {domain2} nodes: {len(nodes_by_cluster.get(clust2, list(mapping.keys())))}")
 
     anchor1 = random.choice(nodes_by_cluster.get(clust1, list(mapping.keys())))
     anchor2 = random.choice(nodes_by_cluster.get(clust2, list(mapping.keys())))

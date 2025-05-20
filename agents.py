@@ -4,17 +4,25 @@
 
 from  __future__ import annotations
 
-import json, os
+import json, tiktoken
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI                                     # GPT-4 wrapper
 from langchain_core.prompts import PromptTemplate                           # Prompt building
 from langchain.output_parsers import StructuredOutputParser, ResponseSchema # JSON parsing
+from openai import OpenAIError
+from openai.lib._parsing._completions import LengthFinishReasonError
 
 from arxiv_search import hybrid_search
 
+MAX_CONTEXT = 16384
+
 load_dotenv()
+
+def num_tokens(text: str, model: str = "gpt-4o") -> int:
+    tokenizer = tiktoken.encoding_for_model(model)
+    return len(tokenizer.encode(text))
 
 # Ontologist
 class OntologistAgent:
@@ -25,7 +33,7 @@ class OntologistAgent:
         self.schemas = [
             ResponseSchema(name="hypothesis",  description="One concise sentence"),
             ResponseSchema(name="mechanism",   description="1-2 sentences, linking each edge"),
-            ResponseSchema(name="assumptions", description="list of explicit assumptions")
+            ResponseSchema(name="assumptions", description="list of explicit assumptions", type="array")
         ]
         self.parser = StructuredOutputParser.from_response_schemas(self.schemas)
         self.prompt = PromptTemplate(
@@ -40,9 +48,7 @@ class OntologistAgent:
             partial_variables={"format_instructions": self.parser.get_format_instructions()} # self.schema
         )
 
-    def run(self, path: List[Dict[str, str]]) -> Dict[str, Any]:
-        triples = [f"{s['head']} -[{s['relation']}]-> {s['tail']}" for s in path]
-        path_str = " | ".join(triples)
+    def run(self, path_str: str) -> Dict[str, Any]:
         prompt_msg = self.prompt.format(path_str=path_str)
         llm_out = self.llm.invoke(prompt_msg).content
         try:
@@ -63,7 +69,7 @@ class DomainExpertAgent:
         self.schemas = [
             ResponseSchema(name="domain",      description="Return the same domain name"),
             ResponseSchema(name="elaboration", description="Detailed technical elaboration (200 words)"),
-            ResponseSchema(name="references",  description="List of 2-4 reference titles")
+            ResponseSchema(name="references",  description="List of 2-4 reference titles", type="array")
         ]
         self.parser = StructuredOutputParser.from_response_schemas(self.schemas)
 
@@ -111,7 +117,7 @@ class BridgeAgent:
             ResponseSchema(name="bridge_idea",      description="Detailed fused proposal"),
             ResponseSchema(name="synergies",        description="How domain A reinforces B (<120 words)"),
             ResponseSchema(name="challenges",       description="Integration difficulties (<120 words)"),
-            ResponseSchema(name="fused_references", description="List of 3-5 paper references")
+            ResponseSchema(name="fused_references", description="List of 3-5 paper references", type="array")
         ]
         self.parser = StructuredOutputParser.from_response_schemas(self.schemas)
         self.prompt = PromptTemplate(
@@ -128,14 +134,22 @@ class BridgeAgent:
         )
 
     def run(self, a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
-        llm_out = self.llm.invoke(self.prompt.format(a_json=json.dumps(a, indent=2),
-                                                 b_json=json.dumps(b, indent=2))).content
-        try:
-            return self.parser.parse(llm_out)
-        except Exception:
-            print(" !! Parsing Failed !!")
-            print("LLM Output:\n", llm_out)
-            return {"bridge_idea": a, "synergies": "", "challenges": "", "fused_references": []}
+        MAX_TRIES = 3
+        for attempt in range(MAX_TRIES):
+            try:
+                prompt_msg = self.prompt.format(a_json=json.dumps(a, separators=(",", ":")), b_json=json.dumps(b, separators=(",", ":")))
+                llm_out = self.llm.invoke(prompt_msg).content
+                return self.parser.parse(llm_out)
+            except LengthFinishReasonError:
+                print(f"BridgeAgent length error attempt {attempt + 1}. Truncating input and retrying...")
+                a["elaboration"] = a["elaboration"][:int(len(a["elaboration"]) * 0.7)]
+                b["elaboration"] = b["elaboration"][:int(len(b["elaboration"]) * 0.7)]
+
+            except OpenAIError as e:
+                print(f"OpenAI error: {e}")
+
+        print("Failed after retries, returning fallback")
+        return {"bridge_idea": a, "synergies": "", "challenges": "", "fused_references": []}
 
 
 # Update: Critic can trigger revision loops

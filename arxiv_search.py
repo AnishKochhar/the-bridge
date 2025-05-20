@@ -35,7 +35,6 @@ DOMAIN_QUERIES = {
 }
 
 load_dotenv()
-print("API KEY LOADED:", os.getenv("OPENAI_API_KEY"))
 
 EMBED = OpenAIEmbeddings(model="text-embedding-3-small")
 DOMAIN_DIR = Path("domain_kb")
@@ -93,6 +92,10 @@ def hybrid_search(query: str, domain: str, k: int = 4) -> List[LC_Doc]:
         # Insert into store
         load_retriever(domain).vectorstore.add_documents(live_docs)
         results += live_docs
+
+    print(f"- arXiv search results for {query} -")
+    for doc in results:
+        print("•", doc.metadata.get("title", "[No title]"))
     return results[:k]
 
 
