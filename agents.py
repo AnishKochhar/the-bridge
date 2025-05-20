@@ -12,20 +12,24 @@ from langchain_openai import ChatOpenAI                                     # GP
 from langchain_core.prompts import PromptTemplate                           # Prompt building
 from langchain.output_parsers import StructuredOutputParser, ResponseSchema # JSON parsing
 
+from arxiv_search import hybrid_search
+
 load_dotenv()
 print("API KEY LOADED:", os.getenv("OPENAI_API_KEY"))
 
 # Helper LLM
-LLM = ChatOpenAI(
-    model="gpt-4o",
-    temperature=0.2,
-    model_kwargs={"response_format": {"type": "json_object"}}
-)
+# LLM = ChatOpenAI(
+#     model="gpt-4o",
+#     temperature=0.3,
+#     model_kwargs={"response_format": {"type": "json_object"}}
+# )
 
 # Ontologist
 class OntologistAgent:
     """ hypothesis: str, mechanism: str, assumptions: [str] """
     def __init__(self):
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
+            model_kwargs={"response_format": {"type":"json_object"}})
         self.schemas = [
             ResponseSchema(name="hypothesis",  description="One concise sentence"),
             ResponseSchema(name="mechanism",   description="1-2 sentences, linking each edge"),
@@ -48,29 +52,40 @@ class OntologistAgent:
         triples = [f"{s['head']} -[{s['relation']}]-> {s['tail']}" for s in path]
         path_str = " | ".join(triples)
         prompt_msg = self.prompt.format(path_str=path_str)
-        llm_out = LLM.invoke(prompt_msg).content
-        return self.parser.parse(llm_out)
+        llm_out = self.llm.invoke(prompt_msg).content
+        try:
+            return self.parser.parse(llm_out)
+        except Exception:
+            print(" !! Parsing Failed !!")
+            print("LLM Output:\n", llm_out)
+            return {"hypothesis": llm_out, "mechanism": "", "assumptions": ""}
+
 
 class DomainExpertAgent:
     """ domain: str, elaboration: str, references: [str] """
     def __init__(self, domain: str):
         self.domain = domain
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
+            model_kwargs={"response_format": {"type":"json_object"}})
+
         self.schemas = [
-            ResponseSchema(name="domain",      description="Return the domain name"),
-            ResponseSchema(name="elaboration", description="Detailed technical elaboration (≤ 200 words)"),
-            ResponseSchema(name="references",  description="List of 2-4 reference titles (no URLs needed)")
+            ResponseSchema(name="domain",      description="Return the same domain name"),
+            ResponseSchema(name="elaboration", description="Detailed technical elaboration (200 words)"),
+            ResponseSchema(name="references",  description="List of 2-4 reference titles")
         ]
         self.parser = StructuredOutputParser.from_response_schemas(self.schemas)
 
         self.prompt = PromptTemplate(
             template=(
-                "You are a senior researcher in {domain}.\n"
-                "Given the following cross-disciplinary hypothesis JSON, produce an in-depth "
-                "domain-specific elaboration and cite 2-4 key references.\n\n"
-                "HYPOTHESIS JSON:\n{onto_json}\n\n"
+                "You are a leading researcher in {domain}.\n"
+                "You are given a hypothesis extracted from a knowledge graph, along with a set of domain-specific papers.\n\n"
+                "Hypothesis JSON:\n{hyp_json}\n\n"
+                "Context documents:\n{docs}\n\n"
+                "Write a technically rigorous elaboration of the hypothesis, supported by insights from the documents above. "
+                "Cite 2-4 relevant papers by their title.\n\n"
                 "{format_instructions}"
             ),
-            input_variables=["onto_json"],
+            input_variables=["hyp_json", "docs"],
             partial_variables={
                 "domain": self.domain,
                 "format_instructions": self.parser.get_format_instructions()
@@ -78,13 +93,28 @@ class DomainExpertAgent:
         )
 
     def run(self, onto_json: Dict[str, Any]) -> Dict[str, Any]:
-        prompt_msg = self.prompt.format(onto_json=json.dumps(onto_json, indent=2))
-        llm_out = LLM.invoke(prompt_msg).content
-        return self.parser.parse(llm_out)
+        # Retrieve the docs
+        query = onto_json["hypothesis"]
+        docs = hybrid_search(query, self.domain)
+        docs_block = "\n\n".join(
+            f"[{i+1}] Title: {d.metadata['title']}\nAbstract: {d.page_content}"
+            for i, d in enumerate(docs)
+        )
+
+        prompt_msg = self.prompt.format(hyp_json=json.dumps(onto_json, indent=2), docs=docs_block)
+        llm_out = self.llm.invoke(prompt_msg).content
+        try:
+            return self.parser.parse(llm_out)
+        except Exception:
+            print(" !! Parsing Failed !!")
+            print("LLM Output:\n", llm_out)
+            return {"domain": self.domain, "elaboration": llm_out, "references": []}
 
 class CriticAgent:
     """ novelty: float, feasbility: float, comments: str """
     def __init__(self):
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
+            model_kwargs={"response_format": {"type":"json_object"}})
         self.schemas = [
             ResponseSchema(name="novelty",     description="Novelty score 0-1"),
             ResponseSchema(name="feasibility", description="Feasibility score 0-1"),
@@ -107,16 +137,22 @@ class CriticAgent:
 
     def run(self, domain_json_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         prompt_msg = self.prompt.format(domain_json=json.dumps(domain_json_list, indent=2))
-        llm_out = LLM.invoke(prompt_msg).content
-        return self.parser.parse(llm_out)
+        llm_out = self.llm.invoke(prompt_msg).content
+        try:
+            return self.parser.parse(llm_out)
+        except Exception:
+            print(" !! Parsing Failed !!")
+            print("LLM Output:\n", llm_out)
+            return {"novelty": "0.1", "feasibility": "0.1", "comments": llm_out}
+
 
 
 def run_pipeline(path: List[Dict[str, str]]) -> Dict[str, Any]:
     onto = OntologistAgent().run(path)
-    bio = DomainExpertAgent("Biomaterials").run(onto)
-    robo = DomainExpertAgent("Robotics").run(onto)
-    critic = CriticAgent().run([bio, robo])
-    return {"ontologist": onto, "domains": [bio, robo], "critic": critic}
+    bio = DomainExpertAgent("Hydrogels & Soft Biomaterials").run(onto)
+    # robo = DomainExpertAgent("Robotics").run(onto)
+    critic = CriticAgent().run([bio])
+    return {"ontologist": onto, "domains": [bio], "critic": critic}
 
 
 if __name__ == "__main__":

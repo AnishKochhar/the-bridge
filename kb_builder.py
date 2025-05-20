@@ -16,7 +16,6 @@ from langchain_chroma import Chroma
 from cluster import DOMAIN_LABELS
 
 load_dotenv()
-print("API KEY LOADED:", os.getenv("OPENAI_API_KEY"))
 
 EMBED = OpenAIEmbeddings(model="text-embedding-3-small")
 DOMAIN_DIR = Path("domain_kb")
@@ -24,9 +23,11 @@ DOMAIN_DIR.mkdir(exist_ok=True)
 CHROMA_DIR = DOMAIN_DIR / "chroma_store"
 
 def fetch_arxiv_bulk(domain_query: str, n: int = 50) -> List[Dict[str, str]]:
+    client = arxiv.Client()
     search = arxiv.Search(query=domain_query, max_results=n, sort_by=arxiv.SortCriterion.SubmittedDate)
     results = []
-    for res in search.results():
+    for res in client.results(search):
+        print(res.title)
         results.append({"title": res.title, "abstract": re.sub(r"\s+", " ", res.summary)})
     return results
 
